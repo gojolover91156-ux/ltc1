@@ -112,6 +112,25 @@ function fmtMoney(value, currency) {
   })} ${currency}`;
 }
 
+
+function walletAddressUrl() {
+  return `https://litecoinspace.org/address/${CONFIG.address}`;
+}
+
+function moneyPair(ltcAmount, price) {
+  const usd = price.usd !== null ? ltcAmount * price.usd : null;
+  const eur = price.eur !== null ? ltcAmount * price.eur : null;
+  return `**${fmtLtc(ltcAmount)}**\n${fmtMoney(usd, "USD")} • ${fmtMoney(eur, "EUR")}`;
+}
+
+function explorerAddressLink() {
+  return `[${CONFIG.address}](https://litecoinspace.org/address/${CONFIG.address})`;
+}
+
+function statusBadge(online = true) {
+  return online ? "🟢 **ONLINE**" : "🔴 **OFFLINE**";
+}
+
 async function fetchLtcPrice() {
   try {
     const response = await fetch(PRICE_API);
@@ -193,75 +212,82 @@ async function buildBalanceEmbed(wallet) {
   const usdValue = price.usd !== null ? confirmed * price.usd : null;
   const eurValue = price.eur !== null ? confirmed * price.eur : null;
 
-  const embed = new EmbedBuilder()
-    .setColor(0x345D9D)
+  return new EmbedBuilder()
+    .setColor(0xB8FF4A)
     .setAuthor({
-      name: "Personal LTC Wallet",
+      name: "LTC • PERSONAL WALLET",
       iconURL: "https://cryptologos.cc/logos/litecoin-ltc-logo.png?v=040"
     })
+    .setTitle("💎 Wallet Overview")
     .setDescription(
-      `**Litecoin Mainnet**\n` +
-      `\`${CONFIG.address}\``
+      `> **Litecoin Mainnet** · Read-only portfolio monitor\n` +
+      `> ${explorerAddressLink()}`
     )
     .addFields(
       {
-        name: "💰 Balance",
-        value: `**${fmtLtc(confirmed)}**\n${fmtMoney(usdValue, "USD")} • ${fmtMoney(eurValue, "EUR")}`,
+        name: "💰 TOTAL BALANCE",
+        value:
+          `### ${fmtLtc(confirmed)}\n` +
+          `**${fmtMoney(usdValue, "USD")}**  ·  **${fmtMoney(eurValue, "EUR")}**`,
         inline: false
       },
       {
-        name: "📥 Total Received",
-        value: fmtLtc(totalReceived),
+        name: "📥 RECEIVED",
+        value: moneyPair(totalReceived, price),
         inline: true
       },
       {
-        name: "📤 Total Sent",
-        value: fmtLtc(totalSent),
+        name: "📤 SENT",
+        value: moneyPair(totalSent, price),
         inline: true
       },
       {
-        name: "🔄 Transactions",
-        value: String(txCount),
+        name: "⛓️ TRANSACTIONS",
+        value: `**${Number(txCount).toLocaleString()}**\nconfirmed`,
         inline: true
       },
       {
-        name: "⏳ Unconfirmed",
-        value: fmtLtc(unconfirmed),
+        name: "⏳ UNCONFIRMED",
+        value: moneyPair(unconfirmed, price),
         inline: true
       },
       {
-        name: "📊 LTC Price",
-        value: price.usd !== null
-          ? `${fmtMoney(price.usd, "USD")}\n${fmtMoney(price.eur, "EUR")}`
-          : "Unavailable",
+        name: "📈 LTC PRICE",
+        value:
+          price.usd !== null
+            ? `**${fmtMoney(price.usd, "USD")}**\n**${fmtMoney(price.eur, "EUR")}**`
+            : "Price unavailable",
         inline: true
       },
       {
-        name: "🔐 Wallet Type",
-        value: "Read-only monitor",
+        name: "🛡️ SECURITY",
+        value: "🔒 Read-only\nNo private keys stored",
         inline: true
       }
     )
+    .addFields({
+      name: "📍 TRACKED ADDRESS",
+      value: `\`${CONFIG.address}\``,
+      inline: false
+    })
     .setFooter({
-      text: "Live blockchain balance • Personal LTC Manager"
+      text: "LTC Personal Manager • Live blockchain data"
     })
     .setTimestamp();
-
-  return embed;
 }
 
 function balanceButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("refresh_balance")
-      .setLabel("Refresh Balance")
+      .setLabel("Refresh")
       .setStyle(ButtonStyle.Primary)
-      .setEmoji("🔄"),
+      .setEmoji("↻"),
     new ButtonBuilder()
-      .setLabel("View Address")
+      .setLabel("Explorer")
       .setStyle(ButtonStyle.Link)
-      .setURL(`https://litecoinspace.org/address/${CONFIG.address}`)
-      .setEmoji("🔗")
+      .setURL(walletAddressUrl())
+      .setEmoji("↗")
   );
 }
 
@@ -273,25 +299,42 @@ async function sendNewTransactionAlert(ref) {
 
   const type = classifyRef(ref);
   const amount = litoshiToLtc(ref.value);
+  const price = await fetchLtcPrice();
 
-  let title = "New Litecoin Transaction";
-  let description = `Transaction: [${shortHash(ref.tx_hash)}](${explorerUrl(ref.tx_hash)})`;
+  const usd = price.usd !== null ? amount * price.usd : null;
+  const eur = price.eur !== null ? amount * price.eur : null;
 
-  if (type === "received") {
-    title = "LTC Received";
-    description = `**+${fmtLtc(amount)}**\n${description}`;
-  } else if (type === "sent") {
-    title = "LTC Sent";
-    description = `**-${fmtLtc(amount)}**\n${description}`;
-  }
+  const received = type === "received";
+  const sent = type === "sent";
 
   const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .addFields(
-      { name: "Status", value: Number(ref.confirmations || 0) > 0 ? "Confirmed" : "Unconfirmed", inline: true },
-      { name: "Confirmations", value: String(ref.confirmations || 0), inline: true }
+    .setColor(received ? 0x57F287 : sent ? 0xED4245 : 0xB8FF4A)
+    .setAuthor({
+      name: received ? "LTC • INCOMING PAYMENT" : sent ? "LTC • OUTGOING PAYMENT" : "LTC • TRANSACTION"
+    })
+    .setTitle(received ? "📥 Litecoin Received" : sent ? "📤 Litecoin Sent" : "⛓️ Litecoin Transaction")
+    .setDescription(
+      `**${received ? "+" : sent ? "-" : ""}${fmtLtc(amount)}**\n` +
+      `${fmtMoney(usd, "USD")} · ${fmtMoney(eur, "EUR")}`
     )
+    .addFields(
+      {
+        name: "STATUS",
+        value: Number(ref.confirmations || 0) > 0 ? "🟢 Confirmed" : "🟡 Unconfirmed",
+        inline: true
+      },
+      {
+        name: "CONFIRMATIONS",
+        value: `**${Number(ref.confirmations || 0)}**`,
+        inline: true
+      },
+      {
+        name: "TRANSACTION",
+        value: `[${shortHash(ref.tx_hash)}](${explorerUrl(ref.tx_hash)})`,
+        inline: true
+      }
+    )
+    .setFooter({ text: "LTC Personal Manager • Live blockchain alert" })
     .setTimestamp();
 
   await channel.send({ embeds: [embed] }).catch(console.error);
@@ -407,7 +450,36 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.commandName === "address") {
       return interaction.reply({
-        content: `**Tracked LTC address:**\n\`${CONFIG.address}\`\n\nhttps://litecoinspace.org/address/${CONFIG.address}`,
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xB8FF4A)
+            .setAuthor({ name: "LTC • WALLET ADDRESS" })
+            .setTitle("📍 Receive Address")
+            .setDescription(
+              `Send Litecoin to the address below.\n\n` +
+              `> \`${CONFIG.address}\``
+            )
+            .addFields({
+              name: "NETWORK",
+              value: "🟢 Litecoin Mainnet",
+              inline: true
+            }, {
+              name: "ACCESS",
+              value: "🔒 Read-only monitor",
+              inline: true
+            })
+            .setFooter({ text: "LTC Personal Manager" })
+            .setTimestamp()
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel("Open Explorer")
+              .setStyle(ButtonStyle.Link)
+              .setURL(walletAddressUrl())
+              .setEmoji("↗")
+          )
+        ],
         ephemeral: true
       });
     }
@@ -431,12 +503,23 @@ client.on("interactionCreate", async interaction => {
       const wallet = await fetchWallet();
 
       return interaction.reply({
-        content:
-          `**LTC Manager Status**\n` +
-          `Monitoring: \`ONLINE\`\n` +
-          `Check interval: \`${CONFIG.checkInterval}s\`\n` +
-          `Known transactions: \`${state.knownTransactions.length}\`\n` +
-          `Wallet transactions: \`${wallet.final_n_tx ?? wallet.n_tx ?? 0}\``,
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x57F287)
+            .setAuthor({ name: "LTC • SYSTEM STATUS" })
+            .setTitle("⚡ Monitor Status")
+            .setDescription("Your personal Litecoin monitor is running normally.")
+            .addFields(
+              { name: "BOT", value: "🟢 **ONLINE**", inline: true },
+              { name: "BLOCKCHAIN", value: "🟢 **CONNECTED**", inline: true },
+              { name: "MONITOR", value: `Every **${CONFIG.checkInterval}s**`, inline: true },
+              { name: "KNOWN TXs", value: `**${state.knownTransactions.length}**`, inline: true },
+              { name: "WALLET TXs", value: `**${wallet.final_n_tx ?? wallet.n_tx ?? 0}**`, inline: true },
+              { name: "MODE", value: "🔒 Read-only", inline: true }
+            )
+            .setFooter({ text: "LTC Personal Manager • System diagnostics" })
+            .setTimestamp()
+        ],
         ephemeral: true
       });
     }
@@ -477,8 +560,19 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle("Recent LTC Transactions")
-            .setDescription(lines.join("\n\n"))
+            .setColor(0xB8FF4A)
+            .setAuthor({ name: "LTC • TRANSACTION HISTORY" })
+            .setTitle("📜 Recent Activity")
+            .setDescription(
+              `Your latest **${unique.length}** Litecoin transaction(s).\n\n` +
+              lines.join("\n\n")
+            )
+            .addFields({
+              name: "WALLET",
+              value: explorerAddressLink(),
+              inline: false
+            })
+            .setFooter({ text: "LTC Personal Manager • Litecoin Mainnet" })
             .setTimestamp()
         ]
       });

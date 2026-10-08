@@ -30,7 +30,7 @@ const CONFIG = {
 
   checkInterval: Math.max(
     Number(process.env.CHECK_INTERVAL || 30),
-    15
+    15,
   ),
 };
 
@@ -74,33 +74,43 @@ const COINGECKO_API =
 let previousTxHashes = new Set();
 
 /* =========================================================
-   SLASH COMMANDS
+   COMMANDS
 ========================================================= */
 
 const commands = [
   new SlashCommandBuilder()
     .setName("balance")
-    .setDescription("View the SNACHZ LTC wallet balance."),
+    .setDescription("View your SNACHZ LTC wallet balance."),
+
+  new SlashCommandBuilder()
+    .setName("bal")
+    .setDescription("Check the balance of any public Litecoin address.")
+    .addStringOption((option) =>
+      option
+        .setName("ltc")
+        .setDescription("Public Litecoin address.")
+        .setRequired(true),
+    ),
 
   new SlashCommandBuilder()
     .setName("history")
-    .setDescription("View recent SNACHZ LTC transactions.")
+    .setDescription("View your SNACHZ LTC wallet history.")
     .addIntegerOption((option) =>
       option
         .setName("count")
         .setDescription("Number of transactions to show.")
         .setRequired(false)
         .setMinValue(1)
-        .setMaxValue(10)
+        .setMaxValue(10),
     ),
 
   new SlashCommandBuilder()
     .setName("address")
-    .setDescription("Show the tracked LTC address."),
+    .setDescription("Show your tracked LTC address."),
 
   new SlashCommandBuilder()
     .setName("refresh")
-    .setDescription("Refresh wallet information."),
+    .setDescription("Refresh your wallet information."),
 
   new SlashCommandBuilder()
     .setName("status")
@@ -108,7 +118,7 @@ const commands = [
 ].map((command) => command.toJSON());
 
 /* =========================================================
-   HELPERS
+   BASIC HELPERS
 ========================================================= */
 
 function isOwner(interaction) {
@@ -131,48 +141,68 @@ function fmtMoney(value, currency) {
     {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
-    }
+    },
   )}`;
 }
 
-function walletAddressUrl() {
-  return `https://litecoinspace.org/address/${CONFIG.ltcAddress}`;
+function walletAddressUrl(address = CONFIG.ltcAddress) {
+  return `https://litecoinspace.org/address/${address}`;
 }
 
 function txUrl(hash) {
   return `https://litecoinspace.org/tx/${hash}`;
 }
 
-function moneyPair(ltc, prices) {
-  const usd =
-    prices.usd > 0
-      ? fmtMoney(ltc * prices.usd, "USD")
-      : "$—";
+function shortAddress(address) {
+  if (!address || address.length < 16) {
+    return address;
+  }
 
-  const eur =
-    prices.eur > 0
-      ? fmtMoney(ltc * prices.eur, "EUR")
-      : "€—";
-
-  return `${usd} • ${eur}`;
+  return `${address.slice(0, 8)}...${address.slice(-8)}`;
 }
 
-/* =========================================================
-   BLOCKCHAIN
-========================================================= */
+function isValidLitecoinAddress(address) {
+  if (!address) return false;
 
-async function fetchWallet() {
-  const response = await fetch(
-    `${BLOCKCYPHER_API}/addrs/${CONFIG.ltcAddress}/full?limit=50`
-  );
+  const clean = address.trim();
 
-  if (!response.ok) {
-    throw new Error(
-      `BlockCypher returned HTTP ${response.status}`
+  /*
+   Litecoin mainnet addresses commonly start with:
+   L / M / 3 / ltc1
+
+   This intentionally only validates the format.
+   The blockchain API remains the final check.
+  */
+
+  if (clean.startsWith("ltc1")) {
+    return /^ltc1[a-z0-9]{20,90}$/i.test(clean);
+  }
+
+  if (
+    clean.startsWith("L") ||
+    clean.startsWith("M")
+  ) {
+    return /^[LM][a-km-zA-HJ-NP-Z1-9]{25,40}$/.test(
+      clean,
     );
   }
 
-  return response.json();
+  if (clean.startsWith("3")) {
+    return /^3[a-km-zA-HJ-NP-Z1-9]{25,40}$/.test(
+      clean,
+    );
+  }
+
+  return false;
+}
+
+function securityText() {
+  return [
+    "READ-ONLY",
+    "No private key stored",
+    "No seed phrase required",
+    "Public address tracking only",
+  ].join("\n");
 }
 
 /* =========================================================
@@ -199,7 +229,7 @@ async function fetchLtcPrice() {
   } catch (error) {
     console.error(
       "CoinGecko price error:",
-      error.message
+      error.message,
     );
 
     return {
@@ -210,41 +240,87 @@ async function fetchLtcPrice() {
 }
 
 /* =========================================================
-   SECURITY TEXT
+   BLOCKCHAIN WALLET FETCH
 ========================================================= */
 
-function securityText() {
-  return [
-    "🔒 **READ-ONLY**",
-    "No private key stored",
-    "No seed phrase required",
-    "Public address tracking only",
-  ].join("\n");
+async function fetchWallet(address = CONFIG.ltcAddress) {
+  const response = await fetch(
+    `${BLOCKCYPHER_API}/addrs/${encodeURIComponent(
+      address,
+    )}/full?limit=50`,
+  );
+
+  if (!response.ok) {
+    let details = "";
+
+    try {
+      const data = await response.json();
+
+      if (data?.error) {
+        details = ` - ${data.error}`;
+      }
+    } catch {}
+
+    throw new Error(
+      `BlockCypher returned HTTP ${response.status}${details}`,
+    );
+  }
+
+  return response.json();
 }
 
 /* =========================================================
-   BALANCE EMBED
+   BUTTONS
+========================================================= */
+
+function balanceButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("refresh_balance")
+      .setLabel("Refresh")
+      .setStyle(ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setLabel("Explorer")
+      .setStyle(ButtonStyle.Link)
+      .setURL(walletAddressUrl()),
+  );
+}
+
+/* =========================================================
+   OWN WALLET BALANCE
 ========================================================= */
 
 async function createBalanceEmbed() {
-  const wallet = await fetchWallet();
+  const wallet = await fetchWallet(
+    CONFIG.ltcAddress,
+  );
+
   const prices = await fetchLtcPrice();
 
-  const balance = litoshiToLtc(wallet.balance);
+  const balance = litoshiToLtc(
+    wallet.balance,
+  );
+
   const totalReceived = litoshiToLtc(
-    wallet.total_received
+    wallet.total_received,
   );
+
   const totalSent = litoshiToLtc(
-    wallet.total_sent
+    wallet.total_sent,
   );
+
   const unconfirmed = litoshiToLtc(
-    wallet.unconfirmed_balance
+    wallet.unconfirmed_balance,
   );
 
-  const confirmedUsd = balance * prices.usd;
-  const confirmedEur = balance * prices.eur;
+  const confirmedUsd =
+    balance * prices.usd;
 
-  const embed = new EmbedBuilder()
+  const confirmedEur =
+    balance * prices.eur;
+
+  return new EmbedBuilder()
     .setColor(0xb8ff4a)
 
     .setAuthor({
@@ -260,11 +336,8 @@ async function createBalanceEmbed() {
         "\u001b[2;37mLIVE WALLET MANAGEMENT SYSTEM\u001b[0m",
         "```",
 
-        `> **Tracked wallet:** [${CONFIG.ltcAddress.slice(
-          0,
-          8
-        )}...${CONFIG.ltcAddress.slice(
-          -8
+        `> **Tracked wallet:** [${shortAddress(
+          CONFIG.ltcAddress,
         )}](${walletAddressUrl()})`,
 
         "",
@@ -275,12 +348,12 @@ async function createBalanceEmbed() {
 
         `**${fmtMoney(
           confirmedUsd,
-          "USD"
+          "USD",
         )}**  •  **${fmtMoney(
           confirmedEur,
-          "EUR"
+          "EUR",
         )}**`,
-      ].join("\n")
+      ].join("\n"),
     )
 
     .addFields(
@@ -290,11 +363,11 @@ async function createBalanceEmbed() {
           `**LTC**  ${fmtLtc(balance)}`,
           `**USD**  ${fmtMoney(
             confirmedUsd,
-            "USD"
+            "USD",
           )}`,
           `**EUR**  ${fmtMoney(
             confirmedEur,
-            "EUR"
+            "EUR",
           )}`,
         ].join("\n"),
         inline: true,
@@ -304,11 +377,13 @@ async function createBalanceEmbed() {
         name: "▸ ACTIVITY",
         value: [
           `Received: **${fmtLtc(
-            totalReceived
+            totalReceived,
           )}**`,
-          `Sent: **${fmtLtc(totalSent)}**`,
+          `Sent: **${fmtLtc(
+            totalSent,
+          )}**`,
           `Pending: **${fmtLtc(
-            unconfirmed
+            unconfirmed,
           )}**`,
         ].join("\n"),
         inline: true,
@@ -336,14 +411,15 @@ async function createBalanceEmbed() {
             {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2,
-            }
+            },
           )}**`,
+
           `LTC/EUR: **€${prices.eur.toLocaleString(
             "en-US",
             {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2,
-            }
+            },
           )}**`,
         ].join("\n"),
         inline: true,
@@ -372,7 +448,7 @@ async function createBalanceEmbed() {
           `[Open in LitecoinSpace](${walletAddressUrl()})`,
         ].join("\n"),
         inline: false,
-      }
+      },
     )
 
     .setFooter({
@@ -381,37 +457,172 @@ async function createBalanceEmbed() {
     })
 
     .setTimestamp();
-
-  return embed;
 }
 
 /* =========================================================
-   BUTTONS
-   IMPORTANT:
-   No emoji is used here.
-   This fixes COMPONENT_INVALID_EMOJI.
+   PUBLIC ADDRESS BALANCE
+   /bal ltc:<address>
 ========================================================= */
 
-function balanceButtons() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("refresh_balance")
-      .setLabel("Refresh")
-      .setStyle(ButtonStyle.Secondary),
+async function createPublicBalanceEmbed(
+  address,
+) {
+  const wallet = await fetchWallet(address);
+  const prices = await fetchLtcPrice();
 
-    new ButtonBuilder()
-      .setLabel("Explorer")
-      .setStyle(ButtonStyle.Link)
-      .setURL(walletAddressUrl())
+  const balance = litoshiToLtc(
+    wallet.balance,
   );
+
+  const unconfirmed = litoshiToLtc(
+    wallet.unconfirmed_balance,
+  );
+
+  const totalReceived = litoshiToLtc(
+    wallet.total_received,
+  );
+
+  const totalSent = litoshiToLtc(
+    wallet.total_sent,
+  );
+
+  const usd = balance * prices.usd;
+  const eur = balance * prices.eur;
+
+  return new EmbedBuilder()
+    .setColor(0xb8ff4a)
+
+    .setAuthor({
+      name: "SNACHZ LTC • PUBLIC LOOKUP",
+    })
+
+    .setTitle("✦  LTC ADDRESS BALANCE")
+
+    .setDescription(
+      [
+        "```ansi",
+        "\u001b[1;32mPUBLIC ADDRESS LOOKUP\u001b[0m",
+        "\u001b[2;37mREAD-ONLY BLOCKCHAIN DATA\u001b[0m",
+        "```",
+
+        `**Address**`,
+        `[\`${address}\`](${walletAddressUrl(
+          address,
+        )})`,
+
+        "",
+
+        "### ◈ CURRENT BALANCE",
+
+        `**${fmtLtc(balance)}**`,
+
+        `**${fmtMoney(
+          usd,
+          "USD",
+        )}**  •  **${fmtMoney(
+          eur,
+          "EUR",
+        )}**`,
+      ].join("\n"),
+    )
+
+    .addFields(
+      {
+        name: "▸ BALANCE",
+        value: [
+          `LTC: **${fmtLtc(
+            balance,
+          )}**`,
+          `USD: **${fmtMoney(
+            usd,
+            "USD",
+          )}**`,
+          `EUR: **${fmtMoney(
+            eur,
+            "EUR",
+          )}**`,
+        ].join("\n"),
+        inline: true,
+      },
+
+      {
+        name: "▸ ACTIVITY",
+        value: [
+          `Received: **${fmtLtc(
+            totalReceived,
+          )}**`,
+          `Sent: **${fmtLtc(
+            totalSent,
+          )}**`,
+          `Pending: **${fmtLtc(
+            unconfirmed,
+          )}**`,
+        ].join("\n"),
+        inline: true,
+      },
+
+      {
+        name: "▸ NETWORK",
+        value: [
+          `Transactions: **${
+            wallet.n_tx || 0
+          }**`,
+          `Unconfirmed: **${
+            wallet.unconfirmed_n_tx || 0
+          }**`,
+          "Network: **Litecoin Mainnet**",
+        ].join("\n"),
+        inline: true,
+      },
+
+      {
+        name: "▸ MARKET",
+        value: [
+          `LTC/USD: **$${prices.usd.toFixed(
+            2,
+          )}**`,
+          `LTC/EUR: **€${prices.eur.toFixed(
+            2,
+          )}**`,
+        ].join("\n"),
+        inline: true,
+      },
+
+      {
+        name: "▸ MODE",
+        value:
+          "PUBLIC ADDRESS • READ-ONLY",
+        inline: true,
+      },
+
+      {
+        name: "▸ EXPLORER",
+        value: `[Open address](${walletAddressUrl(
+          address,
+        )})`,
+        inline: true,
+      },
+    )
+
+    .setFooter({
+      text:
+        "SNACHZ LTC • Public Litecoin Address Lookup",
+    })
+
+    .setTimestamp();
 }
 
 /* =========================================================
-   HISTORY EMBED
+   WALLET-SPECIFIC HISTORY
 ========================================================= */
 
-async function createHistoryEmbed(count = 5) {
-  const wallet = await fetchWallet();
+async function createHistoryEmbed(
+  count = 5,
+) {
+  const wallet = await fetchWallet(
+    CONFIG.ltcAddress,
+  );
+
   const prices = await fetchLtcPrice();
 
   const txs = wallet.txs || [];
@@ -420,73 +631,137 @@ async function createHistoryEmbed(count = 5) {
     .setColor(0xb8ff4a)
 
     .setAuthor({
-      name: "SNACHZ LTC • TRANSACTION HISTORY",
+      name:
+        "SNACHZ LTC • WALLET HISTORY",
     })
 
-    .setTitle("✦  RECENT ACTIVITY")
+    .setTitle(
+      "✦  YOUR WALLET ACTIVITY",
+    )
 
     .setDescription(
       [
         `Showing the latest **${Math.min(
           count,
-          txs.length
-        )}** transactions.`,
+          txs.length,
+        )}** transactions for your wallet.`,
 
         "",
 
-        `Market conversion: **1 LTC ≈ $${prices.usd.toFixed(
-          2
-        )} / €${prices.eur.toFixed(2)}**`,
+        `**Wallet:** [${shortAddress(
+          CONFIG.ltcAddress,
+        )}](${walletAddressUrl()})`,
 
-        `[View wallet on LitecoinSpace](${walletAddressUrl()})`,
-      ].join("\n")
+        "",
+
+        `Market: **1 LTC ≈ $${prices.usd.toFixed(
+          2,
+        )} / €${prices.eur.toFixed(2)}**`,
+      ].join("\n"),
     );
 
   if (!txs.length) {
     embed.addFields({
       name: "NO TRANSACTIONS",
       value:
-        "No transactions were returned by the blockchain API.",
+        "No transactions were found for your LTC wallet.",
     });
   } else {
     for (const tx of txs.slice(0, count)) {
-      const inputTotal = (tx.inputs || []).reduce(
-        (sum, input) =>
-          sum + Number(input.output_value || 0),
-        0
-      );
+      const walletInputs =
+        tx.inputs?.filter((input) =>
+          (input.addresses || []).includes(
+            CONFIG.ltcAddress,
+          ),
+        ) || [];
 
-      const outputTotal = (tx.outputs || []).reduce(
-        (sum, output) =>
-          sum + Number(output.value || 0),
-        0
-      );
+      const walletOutputs =
+        tx.outputs?.filter((output) =>
+          (output.addresses || []).includes(
+            CONFIG.ltcAddress,
+          ),
+        ) || [];
+
+      const receivedLitoshi =
+        walletOutputs.reduce(
+          (sum, output) =>
+            sum +
+            Number(output.value || 0),
+          0,
+        );
+
+      const sentLitoshi =
+        walletInputs.reduce(
+          (sum, input) =>
+            sum +
+            Number(
+              input.output_value || 0,
+            ),
+          0,
+        );
 
       let amountLitoshi = 0;
       let type = "TRANSACTION";
 
-      if (outputTotal > inputTotal) {
-        amountLitoshi =
-          outputTotal - inputTotal;
+      /*
+       Incoming:
+       wallet receives LTC.
 
-        type = "RECEIVED";
-      } else if (inputTotal > outputTotal) {
-        amountLitoshi =
-          inputTotal - outputTotal;
+       Outgoing:
+       wallet spends LTC.
+
+       Transfer:
+       wallet spends LTC and also receives
+       change back in the same transaction.
+      */
+
+      if (
+        sentLitoshi > 0 &&
+        receivedLitoshi > 0
+      ) {
+        amountLitoshi = Math.max(
+          sentLitoshi -
+            receivedLitoshi,
+          0,
+        );
 
         type = "SENT";
-      } else {
+      } else if (
+        receivedLitoshi > 0
+      ) {
+        amountLitoshi =
+          receivedLitoshi;
+
+        type = "RECEIVED";
+      } else if (
+        sentLitoshi > 0
+      ) {
+        amountLitoshi =
+          sentLitoshi;
+
+        type = "SENT";
+      }
+
+      /*
+       Fallback for unusual BlockCypher
+       transaction structures.
+      */
+
+      if (
+        amountLitoshi <= 0 &&
+        Number(tx.total || 0) !== 0
+      ) {
         amountLitoshi = Math.abs(
-          Number(tx.total || 0)
+          Number(tx.total || 0),
         );
       }
 
       const amount = litoshiToLtc(
-        Math.abs(amountLitoshi)
+        amountLitoshi,
       );
 
       const confirmations = Number(
-        tx.confirmations || 0
+        tx.confirmations || 0,
       );
 
       const status =
@@ -494,21 +769,33 @@ async function createHistoryEmbed(count = 5) {
           ? `Confirmed • ${confirmations} confirmations`
           : "Unconfirmed";
 
-      const usd = amount * prices.usd;
-      const eur = amount * prices.eur;
+      const usd =
+        amount * prices.usd;
+
+      const eur =
+        amount * prices.eur;
 
       embed.addFields({
-        name: `${type} • ${fmtLtc(amount)}`,
+        name: `${type} • ${fmtLtc(
+          amount,
+        )}`,
 
         value: [
-          `💵 ${fmtMoney(
+          `USD: **${fmtMoney(
             usd,
-            "USD"
-          )} • ${fmtMoney(eur, "EUR")}`,
+            "USD",
+          )}**`,
 
-          `◈ ${status}`,
+          `EUR: **${fmtMoney(
+            eur,
+            "EUR",
+          )}**`,
 
-          `[View transaction](${txUrl(tx.hash)})`,
+          `Status: **${status}**`,
+
+          `[View transaction](${txUrl(
+            tx.hash,
+          )})`,
         ].join("\n"),
 
         inline: false,
@@ -520,7 +807,7 @@ async function createHistoryEmbed(count = 5) {
 
     .setFooter({
       text:
-        "SNACHZ LTC • Litecoin Mainnet • Live blockchain data",
+        "SNACHZ LTC • Your wallet • Litecoin Mainnet",
     })
 
     .setTimestamp();
@@ -529,20 +816,60 @@ async function createHistoryEmbed(count = 5) {
 }
 
 /* =========================================================
-   STATUS EMBED
+   ADDRESS EMBED
+========================================================= */
+
+function createAddressEmbed() {
+  return new EmbedBuilder()
+    .setColor(0xb8ff4a)
+
+    .setAuthor({
+      name:
+        "SNACHZ LTC • WALLET ADDRESS",
+    })
+
+    .setTitle(
+      "✦  TRACKED ADDRESS",
+    )
+
+    .setDescription(
+      [
+        "```",
+        CONFIG.ltcAddress,
+        "```",
+
+        `[Open LitecoinSpace Explorer](${walletAddressUrl()})`,
+      ].join("\n"),
+    )
+
+    .setFooter({
+      text:
+        "SNACHZ LTC • Read-only wallet manager",
+    })
+
+    .setTimestamp();
+}
+
+/* =========================================================
+   STATUS
 ========================================================= */
 
 async function createStatusEmbed() {
-  const wallet = await fetchWallet();
+  const wallet = await fetchWallet(
+    CONFIG.ltcAddress,
+  );
 
   return new EmbedBuilder()
     .setColor(0xb8ff4a)
 
     .setAuthor({
-      name: "SNACHZ LTC • SYSTEM STATUS",
+      name:
+        "SNACHZ LTC • SYSTEM STATUS",
     })
 
-    .setTitle("✦  MONITOR STATUS")
+    .setTitle(
+      "✦  MONITOR STATUS",
+    )
 
     .setDescription(
       [
@@ -550,19 +877,19 @@ async function createStatusEmbed() {
         "\u001b[1;32m● ONLINE\u001b[0m",
         "\u001b[2;37mSNACHZ LTC is being managed\u001b[0m",
         "```",
-      ].join("\n")
+      ].join("\n"),
     )
 
     .addFields(
       {
         name: "BOT",
-        value: "🟢 **ONLINE**",
+        value: "ONLINE",
         inline: true,
       },
 
       {
         name: "BLOCKCHAIN",
-        value: "🟢 **CONNECTED**",
+        value: "CONNECTED",
         inline: true,
       },
 
@@ -574,7 +901,7 @@ async function createStatusEmbed() {
 
       {
         name: "WALLET",
-        value: "**LTC Mainnet**",
+        value: "LTC Mainnet",
         inline: true,
       },
 
@@ -592,7 +919,7 @@ async function createStatusEmbed() {
 
       {
         name: "MODE",
-        value: "🔒 **READ-ONLY**",
+        value: "READ-ONLY",
         inline: true,
       },
 
@@ -606,7 +933,7 @@ async function createStatusEmbed() {
         name: "TRACKED ADDRESS",
         value: `[\`${CONFIG.ltcAddress}\`](${walletAddressUrl()})`,
         inline: false,
-      }
+      },
     )
 
     .setFooter({
@@ -621,41 +948,60 @@ async function createStatusEmbed() {
    TRANSACTION ALERT
 ========================================================= */
 
-async function sendNewTransactionAlert(tx) {
-  if (!CONFIG.alertChannelId) return;
+async function sendNewTransactionAlert(
+  tx,
+) {
+  if (!CONFIG.alertChannelId) {
+    return;
+  }
 
   try {
     const channel =
       await client.channels.fetch(
-        CONFIG.alertChannelId
+        CONFIG.alertChannelId,
       );
 
-    if (!channel?.isTextBased()) return;
+    if (!channel?.isTextBased()) {
+      return;
+    }
 
-    const prices = await fetchLtcPrice();
+    const prices =
+      await fetchLtcPrice();
 
-    const amount = litoshiToLtc(
-      Math.abs(Number(tx.total || 0))
-    );
+    const amount =
+      litoshiToLtc(
+        Math.abs(
+          Number(tx.total || 0),
+        ),
+      );
 
     const embed = new EmbedBuilder()
       .setColor(0xb8ff4a)
 
       .setAuthor({
-        name: "SNACHZ LTC • WALLET ALERT",
+        name:
+          "SNACHZ LTC • WALLET ALERT",
       })
 
-      .setTitle("✦  NEW TRANSACTION")
+      .setTitle(
+        "✦  NEW TRANSACTION",
+      )
 
       .setDescription(
         [
           `**${fmtLtc(amount)}**`,
-          `${moneyPair(amount, prices)}`,
+
+          `${moneyPair(
+            amount,
+            prices,
+          )}`,
+
           "",
+
           `[View transaction](${txUrl(
-            tx.hash
+            tx.hash,
           )})`,
-        ].join("\n")
+        ].join("\n"),
       )
 
       .addFields({
@@ -676,49 +1022,60 @@ async function sendNewTransactionAlert(tx) {
   } catch (error) {
     console.error(
       "Failed to send transaction alert:",
-      error.message
+      error.message,
     );
   }
 }
 
 /* =========================================================
-   WALLET MONITOR
+   MONITOR
 ========================================================= */
 
 async function monitorWallet() {
   try {
-    const wallet = await fetchWallet();
+    const wallet =
+      await fetchWallet(
+        CONFIG.ltcAddress,
+      );
 
     const txs = wallet.txs || [];
 
-    const currentHashes = new Set(
-      txs
-        .map((tx) => tx.hash)
-        .filter(Boolean)
-    );
+    const currentHashes =
+      new Set(
+        txs
+          .map((tx) => tx.hash)
+          .filter(Boolean),
+      );
 
-    if (previousTxHashes.size > 0) {
+    if (
+      previousTxHashes.size > 0
+    ) {
       for (const tx of txs) {
         if (
           tx.hash &&
-          !previousTxHashes.has(tx.hash)
+          !previousTxHashes.has(
+            tx.hash,
+          )
         ) {
-          await sendNewTransactionAlert(tx);
+          await sendNewTransactionAlert(
+            tx,
+          );
         }
       }
     }
 
-    previousTxHashes = currentHashes;
+    previousTxHashes =
+      currentHashes;
   } catch (error) {
     console.error(
       "Wallet monitor error:",
-      error.message
+      error.message,
     );
   }
 }
 
 /* =========================================================
-   REGISTER GLOBAL COMMANDS
+   REGISTER COMMANDS
 ========================================================= */
 
 async function registerCommands() {
@@ -728,58 +1085,64 @@ async function registerCommands() {
 
   await rest.put(
     Routes.applicationCommands(
-      CONFIG.clientId
+      CONFIG.clientId,
     ),
     {
       body: commands,
-    }
+    },
   );
 
   console.log(
-    "Global slash commands registered successfully."
+    "Global slash commands registered successfully.",
   );
 }
 
 /* =========================================================
-   READY
-   Uses clientReady to avoid the Discord.js v15 warning.
+   CLIENT READY
 ========================================================= */
 
-client.once("clientReady", async () => {
-  console.log(
-    `Logged in as ${client.user.tag}`
-  );
-
-  try {
-    await registerCommands();
-
-    const wallet = await fetchWallet();
-
-    previousTxHashes = new Set(
-      (wallet.txs || [])
-        .map((tx) => tx.hash)
-        .filter(Boolean)
-    );
-
+client.once(
+  "clientReady",
+  async () => {
     console.log(
-      `Tracking LTC wallet: ${CONFIG.ltcAddress}`
+      `Logged in as ${client.user.tag}`,
     );
 
-    console.log(
-      `Monitor interval: ${CONFIG.checkInterval}s`
-    );
+    try {
+      await registerCommands();
 
-    setInterval(
-      monitorWallet,
-      CONFIG.checkInterval * 1000
-    );
-  } catch (error) {
-    console.error(
-      "Startup error:",
-      error
-    );
-  }
-});
+      const wallet =
+        await fetchWallet(
+          CONFIG.ltcAddress,
+        );
+
+      previousTxHashes =
+        new Set(
+          (wallet.txs || [])
+            .map((tx) => tx.hash)
+            .filter(Boolean),
+        );
+
+      console.log(
+        `Tracking LTC wallet: ${CONFIG.ltcAddress}`,
+      );
+
+      console.log(
+        `Monitor interval: ${CONFIG.checkInterval}s`,
+      );
+
+      setInterval(
+        monitorWallet,
+        CONFIG.checkInterval * 1000,
+      );
+    } catch (error) {
+      console.error(
+        "Startup error:",
+        error,
+      );
+    }
+  },
+);
 
 /* =========================================================
    INTERACTIONS
@@ -789,9 +1152,9 @@ client.on(
   "interactionCreate",
   async (interaction) => {
     try {
-      /* ---------------------------------------------
+      /* =====================================================
          REFRESH BUTTON
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.isButton() &&
@@ -802,7 +1165,8 @@ client.on(
           return interaction.reply({
             content:
               "You are not authorized to use this wallet manager.",
-            flags: MessageFlags.Ephemeral,
+            flags:
+              MessageFlags.Ephemeral,
           });
         }
 
@@ -813,42 +1177,48 @@ client.on(
 
         await interaction.editReply({
           embeds: [embed],
-          components: [balanceButtons()],
+          components: [
+            balanceButtons(),
+          ],
         });
 
         return;
       }
 
-      /* ---------------------------------------------
-         ONLY SLASH COMMANDS BELOW
-      --------------------------------------------- */
+      /* =====================================================
+         CHAT INPUT ONLY
+      ===================================================== */
 
-      if (!interaction.isChatInputCommand()) {
+      if (
+        !interaction.isChatInputCommand()
+      ) {
         return;
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
          OWNER CHECK
-      --------------------------------------------- */
+      ===================================================== */
 
       if (!isOwner(interaction)) {
         return interaction.reply({
           content:
-            "⛔ You are not authorized to use SNACHZ LTC.",
-          flags: MessageFlags.Ephemeral,
+            "You are not authorized to use SNACHZ LTC.",
+          flags:
+            MessageFlags.Ephemeral,
         });
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
          /balance
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.commandName ===
         "balance"
       ) {
         await interaction.deferReply({
-          flags: MessageFlags.Ephemeral,
+          flags:
+            MessageFlags.Ephemeral,
         });
 
         const embed =
@@ -856,31 +1226,93 @@ client.on(
 
         await interaction.editReply({
           embeds: [embed],
-          components: [balanceButtons()],
+          components: [
+            balanceButtons(),
+          ],
         });
 
         return;
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
+         /bal ltc:<ADDRESS>
+      ===================================================== */
+
+      if (
+        interaction.commandName ===
+        "bal"
+      ) {
+        const address =
+          interaction.options
+            .getString("ltc")
+            ?.trim();
+
+        if (
+          !address ||
+          !isValidLitecoinAddress(
+            address,
+          )
+        ) {
+          return interaction.reply({
+            content:
+              "Invalid Litecoin address. Please provide a valid public LTC mainnet address.",
+            flags:
+              MessageFlags.Ephemeral,
+          });
+        }
+
+        await interaction.deferReply({
+          flags:
+            MessageFlags.Ephemeral,
+        });
+
+        try {
+          const embed =
+            await createPublicBalanceEmbed(
+              address,
+            );
+
+          await interaction.editReply({
+            embeds: [embed],
+          });
+        } catch (error) {
+          console.error(
+            "/bal error:",
+            error,
+          );
+
+          await interaction.editReply({
+            content:
+              "Could not fetch that Litecoin address. Make sure the address is a valid LTC mainnet address.",
+            embeds: [],
+          });
+        }
+
+        return;
+      }
+
+      /* =====================================================
          /history
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.commandName ===
         "history"
       ) {
         await interaction.deferReply({
-          flags: MessageFlags.Ephemeral,
+          flags:
+            MessageFlags.Ephemeral,
         });
 
         const count =
           interaction.options.getInteger(
-            "count"
+            "count",
           ) || 5;
 
         const embed =
-          await createHistoryEmbed(count);
+          await createHistoryEmbed(
+            count,
+          );
 
         await interaction.editReply({
           embeds: [embed],
@@ -889,60 +1321,36 @@ client.on(
         return;
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
          /address
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.commandName ===
         "address"
       ) {
-        const embed = new EmbedBuilder()
-          .setColor(0xb8ff4a)
-
-          .setAuthor({
-            name:
-              "SNACHZ LTC • WALLET ADDRESS",
-          })
-
-          .setTitle(
-            "✦  TRACKED ADDRESS"
-          )
-
-          .setDescription(
-            [
-              "```",
-              CONFIG.ltcAddress,
-              "```",
-              `[Open LitecoinSpace Explorer](${walletAddressUrl()})`,
-            ].join("\n")
-          )
-
-          .setFooter({
-            text:
-              "SNACHZ LTC • Read-only wallet manager",
-          })
-
-          .setTimestamp();
-
         await interaction.reply({
-          embeds: [embed],
-          flags: MessageFlags.Ephemeral,
+          embeds: [
+            createAddressEmbed(),
+          ],
+          flags:
+            MessageFlags.Ephemeral,
         });
 
         return;
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
          /refresh
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.commandName ===
         "refresh"
       ) {
         await interaction.deferReply({
-          flags: MessageFlags.Ephemeral,
+          flags:
+            MessageFlags.Ephemeral,
         });
 
         const embed =
@@ -950,22 +1358,25 @@ client.on(
 
         await interaction.editReply({
           embeds: [embed],
-          components: [balanceButtons()],
+          components: [
+            balanceButtons(),
+          ],
         });
 
         return;
       }
 
-      /* ---------------------------------------------
+      /* =====================================================
          /status
-      --------------------------------------------- */
+      ===================================================== */
 
       if (
         interaction.commandName ===
         "status"
       ) {
         await interaction.deferReply({
-          flags: MessageFlags.Ephemeral,
+          flags:
+            MessageFlags.Ephemeral,
         });
 
         const embed =
@@ -980,7 +1391,7 @@ client.on(
     } catch (error) {
       console.error(
         "Interaction error:",
-        error
+        error,
       );
 
       const message =
@@ -999,21 +1410,22 @@ client.on(
         } else {
           await interaction.reply({
             content: message,
-            flags: MessageFlags.Ephemeral,
+            flags:
+              MessageFlags.Ephemeral,
           });
         }
       } catch (replyError) {
         console.error(
           "Failed to send error response:",
-          replyError.message
+          replyError.message,
         );
       }
     }
-  }
+  },
 );
 
 /* =========================================================
-   ERROR HANDLERS
+   PROCESS ERRORS
 ========================================================= */
 
 process.on(
@@ -1021,9 +1433,9 @@ process.on(
   (error) => {
     console.error(
       "Unhandled rejection:",
-      error
+      error,
     );
-  }
+  },
 );
 
 process.on(
@@ -1031,9 +1443,9 @@ process.on(
   (error) => {
     console.error(
       "Uncaught exception:",
-      error
+      error,
     );
-  }
+  },
 );
 
 /* =========================================================
